@@ -1,0 +1,362 @@
+---
+title: "Bellabeat Case Study"
+author: "Brandon Ledbetter"
+date: "2023-10-04"
+output:
+  prettydoc::html_pretty:
+    theme: leonids
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# About the case study
+
+### Bellabeat is a high-tech manufacture of health-focused products aimed at women.
+
+The idea for this case study is to take information from known FitBit data and see if there are potential ways to guide the advertisement of products from Bellabeat, either to improve the experience of current users or to potentially find a space in the markets whose needs have not yet been met.
+
+The main focus for recommendations is going to be around finding marketing suggestions for their mainline product the [Ivy](https://bellabeat.com/ivy/). The Ivy is a smart connected health tracker that stands out as a product made to look like a fashion piece first. It can be purchased with a variety of accessories that let's the Ivy be worn as jewelry on the wrist, around the neck, or a multitude of other options to integrate with the users everyday life.
+
+Data used for this case study can be found on [this Kaggle page](https://www.kaggle.com/datasets/arashnic/fitbit). Licensing information can be found [here](https://creativecommons.org/publicdomain/zero/1.0/)
+
+## Questions to answer
+
+1.  What is the user base for FitBit like? What potential market segments are missing?
+2.  What features aren't being fully utilized by users and why?
+3.  How could users utilize Ivy to alleviate potential issues with FitBit?
+
+# Preparing the data
+
+## Boilerplate
+
+```{r}
+library(tidyverse)
+library(patchwork)
+```
+
+### Importing datasets
+
+```{r}
+dailyActivity <- read_csv("data/raw/dailyActivity_merged.csv")
+dailyIntensity <- read_csv("data/raw/dailyIntensities_merged.csv")
+heartRate <- read_csv("data/raw/heartrate_seconds_merged.csv")
+sleepPerDay <- read.csv("data/raw/sleepDay_merged.csv")
+```
+
+
+```{r}
+head(dailyIntensity)
+head(heartRate)
+```
+
+Looking at the imported data the first issue of note is that the date format was not recognized and needs to be corrected.
+
+```{r}
+dailyActivity$ActivityDate <- mdy(dailyActivity$ActivityDate)
+sleepPerDay$SleepDay <- round_date(mdy_hms(sleepPerDay$SleepDay), "day")
+dailyIntensity$ActivityDay <- mdy(dailyIntensity$ActivityDay)
+heartRate$Time <- mdy_hms(heartRate$Time)
+```
+
+### Checking for lack of data and potential outliers
+
+```{r}
+n_distinct(dailyActivity$Id)
+n_distinct(sleepPerDay$Id)
+n_distinct(dailyIntensity$Id)
+n_distinct(heartRate$Id)
+```
+First thing of note is that sleep tracking and heart rate monitoring have significantly less users logged on them. There should still be enough to get some useful data out of them as long as there is enough daily tracked data in them.
+
+```{r}
+sleepPerDay %>% 
+  group_by(Id) %>% 
+  summarise(meanHrs = mean(TotalMinutesAsleep)/60, n = n()) %>% 
+  print(n = 24)
+```
+
+While there is enough data from a lot of the users, there is also multiple users that only have a few logged times sleeping. When looking at the data for useful insights into behavior we don't want these affecting the data. It may also prove useful to see the trends for the users that only used this feature a couple times so I will be making a separate data frame that filters them out to keep the original data set intact.
+
+```{r}
+sleepPerDay <- sleepPerDay %>% add_count(Id)
+sleepPerDayFiltered <- sleepPerDay %>% filter(n >= 15)
+
+sleepPerDay %>% 
+  select(TotalMinutesAsleep, TotalTimeInBed) %>% 
+  summary()
+
+sleepPerDayFiltered %>%
+  select(TotalMinutesAsleep, TotalTimeInBed) %>% 
+  summary()
+```
+1st and 3rd Quartile and Median data has shifted showing that the low data count was skewing the data lower. Most likely those users were not tracking their full sleeping habits and either occasional light sleeps were being tracked.
+
+### Adjusting the heart rate data
+
+```{r}
+heartRate %>% 
+  group_by(Id) %>% 
+  summarise(meanBPM = mean(Value), n = n()) %>% 
+  print(n = 14)
+```
+
+Similar to sleep tracking there are some who have much less data to be tracked. Their mean value does track significantly higher than the rest but this could be that they are only tracking their exercises which would still be valuable data to keep in the set for figuring out potential demographics so I won't be removing them but will be separating the data to try and pull further insights as we go.
+
+## Adjusting data layouts
+
+We're going to need to add some additional relevant data to most of the tables as well as grabbing the average values from the heart rate monitoring to make the data easier to visualize.
+
+### Creating daily and hourly heart rate datasets
+
+```{r}
+heartRate$Date <- as.Date(heartRate$Time)
+heartRateDaily <- heartRate %>% 
+  group_by(Id, Date) %>% 
+  summarise(Value = mean(Value))
+heartRateDaily$dayOfWeek <- weekdays(heartRateDaily$Date)
+
+head(heartRateDaily)
+```
+
+First up is daily heart rate monitoring. This is for trying to find consistent days of high activity. Now we need another table for hourly tracking. This will require some extra vectors to keep track of more information than the daily.
+
+```{r}
+heartRate$Hour <- hour(heartRate$Time)
+heartRateHourly <- heartRate
+heartRateHourly <- heartRateHourly %>% 
+  group_by(Id, Date, Hour) %>%
+  summarise(avg = mean(Value))
+heartRateHourly$Weekday <- weekdays(heartRateHourly$Date)
+heartRateHourly$Weekday <- factor(heartRateHourly$Weekday,
+                                  levels = c("Monday", "Tuesday",
+                                             "Wednesday","Thursday", 
+                                             "Friday", "Saturday", "Sunday"))
+
+head(heartRateHourly)
+```
+
+With this we can get more granular and look at when are people most active throughout the day for each day of the week to see if the habits they have can tell us more about the demographics.
+
+### Preparing intensity data
+
+```{r}
+head(dailyIntensity)
+```
+Here the data is in a wide format with each grouping of intensity in it's own column. I want to look through the data for trends and habits on a day by day basis so the data is going to need to be pivoted. Also I want to look at overall usage as well as active time so I'll make a second table removing sedentary time.
+
+```{r}
+intensityMinutes <- dailyIntensity %>% select(Id, ActivityDay, SedentaryMinutes,
+                                              LightlyActiveMinutes, FairlyActiveMinutes,
+                                              VeryActiveMinutes)
+
+intensityLonger <- intensityMinutes %>% 
+  pivot_longer(
+    cols = !c(Id, ActivityDay),
+    names_to = "ActivityLevel",
+    values_to = "Minutes"
+  )
+
+intensityLonger$dayOfWeek <- weekdays(intensityLonger$ActivityDay)
+intensityExercise <- intensityLonger %>% filter(ActivityLevel != "SedentaryMinutes")
+
+head(intensityLonger)
+head(intensityExercise)
+```
+
+Now that the data is cleaned and prepared we're ready to move onto searching for insights and finding some answers to our questions.
+
+
+# Visualizing the data
+
+## Heart rate monitoring
+```{r}
+heartRateDaily %>% 
+  ggplot(aes(Date, Value)) +
+  geom_point() +
+  labs(title = "Daily Average Heart Rate",
+       y = "Heart Rate in Beats Per Minute")
+```
+
+So looking at overall heart rates across the days there are a couple of outlines but no significant trends to be seen. But looking at each user, the data becomes a bit clearer.
+
+```{r}
+heartRateDaily %>% 
+  ggplot(aes(Date, Value)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~Id) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(title = "Daily Heart Rate by User", y = "Heart Rate in Beats Per Minute")
+```
+
+A few things stand out here. First off is that you can fairly clearly see that different users have different average heart rates. This could be differences in resting heart rate or in daily life differences such as having a more active job or overall lifestyle. The one's with fewer data points overall also either have only low or only high measurements indicating that either:
+1. Partial users only utilize heart rate monitoring for exercise. Or,
+2. Partial users tried daily monitoring and either turned it off or stopped using the device out of lack of interest
+
+However, the majority of users are tracking enough day to day which suggests that the majority of users do wear their fitness trackers daily and like to use the heart tracking function.
+
+## Low sleep tracking usage
+
+Next we're going to try and see if we can figure out why users are quitting sleep tracking after only a few tries.
+
+```{r}
+sleepPerDay %>% 
+  ggplot(aes(SleepDay)) +
+  geom_bar(aes(fill = n %in% c(1:15))) +
+  labs(title = "Low Participation in Sleep Tracking",
+       subtitle = "Looking for trends in users quitting",
+       x = "Date",
+       fill = "Low Participation")
+```
+
+So looking at the overall trends there isn't a early adoption drop off overall, but there are spikes and drop offs overall in the low participation users, suggesting that users are picking up and dropping the feature quickly, just not as soon as they get their device. To be sure we need to look at each user's daily trends individually.
+
+```{r}
+sleepPerDay %>%
+  filter(n < 15) %>% 
+  ggplot(aes(SleepDay, factor(Id))) +
+  geom_point(aes(color = factor(Id), size = 20)) +
+  theme(legend.position = "none") +
+  labs(title = "Sleep Tracking by Day Per User, Low Utilization Only",
+       subtitle = "Each dot is a day where sleep tracking was utilized",
+       x = "Date",
+       y = "User")
+```
+
+So it does look like users are picking up and dropping sleep tracking fairly quickly. Most individual users that didn't use much sleep tracking tried it for a couple of days and then maybe a day or two after that, and then gave up entirely. This suggests that there is something they run into that makes them quit using the feature. This could be a couple of things.
+1. The user tries sleep tracking and finds out they aren't interested in the data they get.
+2. The user isn't getting relevant recommendations and stops using the feature.
+3. The device is interfering with their quality of sleep and they stop wearing it when they go to bed.
+
+This could an area where Ivy is poised to fill a need. The Ivy being a smaller device that easily attached to a multitude of other wearables means that it could handle the comfort factor quiet easily. However, there isn't enough data to sort this possibility out from the rest. Before moving forward with this as an advertising angle I would recommend further studies, but that will be covered later.
+
+## Sleep tracking usage
+
+Next up is the sleep data that we can pull information from. Two things to look out for with sleep quality is both how long, 6-8 hours depending on age and other factors, but also sleep consistency. A range of sleep times can mean that someone is getting poor quality sleep even if they are getting the right ammount the majority of the time.
+
+```{r}
+sleepPerDayFiltered %>% 
+  ggplot(aes(TotalMinutesAsleep)) +
+  geom_density(aes(alpha = 0.1, fill = factor(Id), color = factor(Id))) +
+  facet_wrap(~factor(Id)) +
+  scale_x_time(position = "top") +
+  theme(legend.position = "none") +
+  labs(title = "Time Spent Asleep by User",
+       subtitle = "Spread in sleep times may indicate poor sleep quality",
+       x = "Hours Asleep")
+```
+
+Looking at the density spread you would want to see a close bell curve near that 6-8 hour mark, indicating that someone is consistently getting the right amount of sleep. Very few of the users here show that. Some have some very small spots, usually meaning naps, but a lot are spread flat meaning that they are sleeping a wide range of times.
+
+Bellabeat's app could utilize this data to send recommendations to users about getting more consistent sleep times or sending a reminder to put down electronic devices a set time before a pre-determined sleep schedule. Both helping the user get more consistent sleep while also making the data collected useful to the user, making them want to continue using it.
+
+## Activity usage
+
+```{r}
+intensityLonger %>% 
+  ggplot(aes(ActivityDay, Minutes)) +
+  geom_bar(stat="identity",
+           aes(fill = factor(ActivityLevel,
+               levels = c("VeryActiveMinutes",
+                          "FairlyActiveMinutes",
+                          "LightlyActiveMinutes",
+                          "SedentaryMinutes")))) +
+  labs(title = "Total Time Spent Wearing Fitness Tracker",
+       x = "Date", y = "Total Usage Minutes",
+       fill = "Activity Level")
+```
+
+Here we're looking at the overall usage time added together. There's a heavy bias to sedentary minutes because as we saw with the heart rate monitoring, the majority of users wear their device all day, and many even overnight. At this scale it's hard to see any differences in higher activity levels but if we look at overall usage as a day of the week there is something of note.
+
+```{r}
+intensityLonger %>% 
+  ggplot(aes(ActivityDay, Minutes)) +
+  geom_bar(stat="identity", aes(fill = dayOfWeek %in% c("Saturday", "Sunday"))) +
+  labs(title = "Activity Time by Day of the Week",
+       x = "Date", y = "Total Usage Minutes",
+       fill = "Is Weekend")
+```
+
+Saturday and Sunday consistently have the lowest total tracked time each week. This means that users aren't wearing their devices as much on the weekend. This could be because of two major reasons.
+1. Users are less active around the house on the weekend and don't put on the device (we will explore this later)
+2. Users don't wear the FitBit when they go out on the weekends. Possibly because it doesn't match the outfit they are wearing.
+
+Fitness trackers and smart watches are as much a fashion piece as they are tech, and Ivy already presents itself as a fashion piece so focusing the advertising on "the device for everyday, even when out with friends." This data is leaning towards showing that the looks of the device matter as much to the user, sometimes even more given the situation, as it's functionality.
+
+### Time spent active
+
+```{r}
+intensityExercise %>% 
+  ggplot(aes(ActivityDay, Minutes)) +
+  geom_bar(stat="identity", aes(fill = factor(ActivityLevel,
+                                              levels = c("VeryActiveMinutes",
+                                                         "FairlyActiveMinutes",
+                                                         "LightlyActiveMinutes")))) +
+  labs(title = "Total Active Time of All Users",
+       x = "Date", y = "Total Usage Minutes",
+       fill = "Activity Level")
+```
+
+Here is just the time spent not sedentary overall by users. There is a higher amount of time spent very active early on and it tapers off after April 25th suggesting that users try exercising more before falling back into more routine habits, but there's not a lot of data to go on there. More interesting is when we look at activity time against weekdays/weekends like before.
+
+```{r}
+intensityExercise %>%
+  ggplot(aes(ActivityDay, Minutes)) +
+  geom_bar(stat="identity", aes(fill = dayOfWeek %in% c("Saturday", "Sunday"))) +
+  labs(title = "Time Spent Active",
+       x = "Date", y = "Total Usage Minutes",
+       fill = "Is Weekend")
+```
+
+Saturdays have the most amount of time active overall and are far and away the most active day of the weekend. So despite having less tracked time overall, users are more active on Saturday, suggesting that users are simply not wearing their FitBits at the start of the day and putting them on later. To dig deeper into this possibility we need to look at hourly heart rate monitoring.
+
+## Heart rates throughout the day
+
+Learning from the daily heatrate monitor, let's look at individuals first to see what their habits are
+```{r}
+heartRateHourly %>% 
+  mutate(Hour = as.POSIXct(paste(Hour, "00", sep = ":"), format = "%H:%M")) %>%
+  ggplot(aes(Hour, avg)) +
+  geom_point() +
+  facet_wrap(~Id) +
+  scale_x_datetime(position = "top", date_labels = "%H:%M") +
+  theme(axis.text.x = element_text(angle = 45)) +
+  labs(title = "Hourly Heart Rate per User",
+       x = "Time of Day",
+       y = "Heart Rate in Beats Per Minute")
+```
+
+You can quickly see which users take off the FitBit at night as well as the one who mostly uses it for exercise. Overall the majority of the week is spent with lower average heart rates, as we saw with the amount of sedentary time. There are a few different types of trends to look for with the higher heart rates.
+1. Clusters around 5PM to 8PM, indicating regular exercise after getting out of work.
+2. Spread over the afternoons into early mornings indicating regular use even when out late like on the weekends. Only 2 of note there.
+3. Overall wide spread indicating a more active lifestyle overall or a physically active job.
+
+So while there is some activity suggesting that some people wear their FitBit at all times, the number of people is very few. And if we take a look at overall trends looking for weekdays vs. weekends again it shows a similar outlook.
+
+```{r}
+heartRateHourly %>%
+  mutate(Hour = as.POSIXct(paste(Hour, "00", sep = ":"), format = "%H:%M")) %>%
+  ggplot(aes(Hour, avg)) +
+  geom_point(aes(color = Weekday %in% c("Saturday", "Sunday"))) +
+  scale_x_datetime(position = "top", date_labels = "%H:%M") +
+  theme(axis.text.x = element_text(angle = 45)) +
+  labs(title = "Hourly Heart Rate by Day of the Week",
+       x = "Time of Day",
+       y = "Heart Rate in Beats Per Minute",
+       color = "Is Weekend")
+```
+
+Again we can see a large clustering later in the day, when most people get off work, implying exercise or simply going out after work. Interestingly the weekend contributes to the majority of the mid day spike before 5PM. But also most of the readings for after midnight are from Saturday and Sunday, meaning those are people going out later at night on their time off. But comparing those measurements with the previous chart, those are covered by only 2 of the people being measured. **Altogether this means that lack of data on weekends is coming from both leaving the device off until later in the day and not wearing the device in the afternoon.** Suggesting that a good missing market segment could be reached by aiming to show how the Ivy is poised to fit more into users weekend life.
+
+# Recommendations and potential unknowns
+
+Looking at what we can find in this data the biggest focus for the advertising direction of the Ivy should lean on it's ability to fit in as a fashion piece alongside it's metrics. There is a noticeably under-served part of the market that does like using the FitBit to track their data, but doesn't wear it on the weekends or out late, and a big portion could be the lack of ability to fit the device in with their lifestyle. Focusing on how the device fits into a wide range of needs and styles to match the changes of a users day could help to bridge that need for customers.
+
+There is also the possibility of this device being much more comfortable and usable for sleep tracking, it's clear that users are interested in utilizing this feature, but drop off for one reason or another. However, there isn't enough data here to make a definitive conclusion on why they drop off and if this was a pursued angle I would suggest further research be done.
+
+## Potential future research
+
+When looking into another advertisement run I think it would be beneficial to add in the focus on sleep tracking to really push the Ivy as a device that fits into all parts of one's lifestyle. But to gather more data to figure out what customers do feel is missing from current sleep tracking I think a customer survey would help a lot. A lot of potential issues with sleep tracking would be classified as qualitative data and surveys are a good spot to let people fill out these concerns and issues. Then once we've pinned down a market portion that is interested in sleep tracking but is missing a need that Ivy can provide, then we could move forward with adding that to future campaigns.
